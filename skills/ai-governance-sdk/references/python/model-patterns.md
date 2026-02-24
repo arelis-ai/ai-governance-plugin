@@ -26,7 +26,10 @@ arelis = create_arelis({
     "platform": {
         "apiKey": os.environ["ARELIS_API_KEY"],
         **({"baseUrl": os.environ["ARELIS_API_URL"]} if os.environ.get("ARELIS_API_URL") else {}),
-    }
+    },
+    # Optional: set default aiSystemId that auto-propagates through governed_invoke,
+    # agents.run, governance gate, platform events, proofs, risk, and MCP evaluations.
+    **({"aiSystemId": os.environ["ARELIS_AI_SYSTEM_ID"]} if os.environ.get("ARELIS_AI_SYSTEM_ID") else {}),
 })
 
 result = await arelis.governed_invoke(GovernedInvokeInput(
@@ -34,6 +37,7 @@ result = await arelis.governed_invoke(GovernedInvokeInput(
     prompt="Summarize AI governance controls in two bullets.",
     deny_mode="return",
     invoke=lambda sanitized_prompt: call_model(sanitized_prompt),
+    # ai_system_id="ais_..."  # optional per-call override (takes precedence over config default)
 ))
 
 if result.invoked:

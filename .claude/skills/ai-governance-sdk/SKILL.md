@@ -9,7 +9,6 @@ Governed AI orchestration framework supporting **TypeScript** and **Python**. Ev
 
 ## Language Detection
 
-Determine which SDK the user is working with:
 - **TypeScript**: imports from `@arelis-ai/ai-governance-sdk`, uses `createArelis`, `governedInvoke`, `withGovernanceGate`, `ArelisPlatform`, `.ts`/`.tsx` files
 - **Python**: `pip install ai-governance-sdk`, imports from `arelis` (e.g. `from arelis import create_arelis, GovernedInvokeInput`), `.py` files, FastAPI/Django/Flask
 
@@ -25,17 +24,13 @@ Determine which SDK the user is working with:
 | **Governance gate** | `withGovernanceGate()` | `with_governance_gate()` |
 | **PII scanning** | `scanPromptForPii()` | `scan_prompt_for_pii()` |
 | **Platform client** | `ArelisPlatform` / `arelis.platform` | `create_arelis_platform()` / `arelis.platform` |
-| **Local governance client** | `createArelisClient()` | Not available — call model providers directly |
-| **Policy engine** | Local `PolicyEngine` with automatic checkpoints | Platform-side `evaluate_policy()` + managed PII config |
+| **Local governance client** | `createArelisClient()` | Not available |
+| **Policy engine** | Local `PolicyEngine` with checkpoints | Platform-side `evaluate_policy()` + managed PII |
 | **Audit sink** | Local sink + platform events | Platform events only |
-
-Both SDKs share the same platform API surface. The Python SDK now has feature parity with TypeScript for unified orchestration (`governed_invoke`, `agents.run`, governance gates, managed PII).
 
 ---
 
 ## TypeScript Quick Start
-
-See [typescript/setup-patterns.md](references/typescript/setup-patterns.md) for full setup and [typescript/model-patterns.md](references/typescript/model-patterns.md) for `governedInvoke` details.
 
 ```typescript
 import { createArelis, type GovernedAgentTool } from '@arelis-ai/ai-governance-sdk';
@@ -45,10 +40,10 @@ const arelis = createArelis({
     apiKey: process.env.ARELIS_API_KEY!,
     ...(process.env.ARELIS_API_URL ? { baseUrl: process.env.ARELIS_API_URL } : {}),
   },
+  aiSystemId, // optional: auto-propagated to all SDK surfaces
 });
 
 const result = await arelis.governedInvoke({
-  runId: `run-${crypto.randomUUID()}`,
   model: 'gemini-2.5-flash',
   prompt: 'Summarize AI governance controls.',
   denyMode: 'return',
@@ -56,28 +51,7 @@ const result = await arelis.governedInvoke({
 });
 ```
 
-### TS Unified Namespaces
-
-| Namespace | Methods |
-|-----------|---------|
-| `arelis.governedInvoke` | `governedInvoke(...)` |
-| `arelis.agents` | `run(...)` |
-| `arelis.governance` | `getPiiConfig({ namespace? })` |
-| `arelis.platform` | `events`, `governance`, `risk`, `replay`, `graphs`, `proofs`, `aiSystems` |
-
-### TS Runtime Namespaces (`createArelisClient`)
-
-See [typescript/api-reference.md](references/typescript/api-reference.md) for complete namespace and method reference.
-
-### CRITICAL: No client.policy
-
-`ArelisClient` does **not** have a `client.policy` namespace. For custom checkpoints (`BeforeToolCall`, `AfterToolResult`), export the `PolicyEngine` directly and call `policyEngine.evaluate()`. See [typescript/governance-patterns.md](references/typescript/governance-patterns.md#custom-policy-checkpoint-evaluation-no-clientpolicy).
-
----
-
 ## Python Quick Start
-
-See [python/setup-patterns.md](references/python/setup-patterns.md) for full setup and [python/model-patterns.md](references/python/model-patterns.md) for `governed_invoke` details.
 
 ```python
 from arelis import create_arelis, GovernedInvokeInput
@@ -86,7 +60,8 @@ arelis = create_arelis({
     "platform": {
         "apiKey": os.environ["ARELIS_API_KEY"],
         **({"baseUrl": os.environ["ARELIS_API_URL"]} if os.environ.get("ARELIS_API_URL") else {}),
-    }
+    },
+    "aiSystemId": ai_system_id,  # optional: auto-propagated
 })
 
 result = await arelis.governed_invoke(GovernedInvokeInput(
@@ -97,31 +72,9 @@ result = await arelis.governed_invoke(GovernedInvokeInput(
 ))
 ```
 
-### Python Unified Namespaces
-
-| Namespace | Methods |
-|-----------|---------|
-| `arelis.governed_invoke()` | High-level orchestrated model invocation |
-| `arelis.agents.run()` | Multi-step governed agent loop |
-| `arelis.governance.get_pii_config()` | Managed PII config from platform |
-| `arelis.platform` | `events`, `governance`, `risk`, `replay`, `graphs`, `proofs`, `aiSystems` |
-
-### Python Standalone Functions
-
-| Function | Description |
-|----------|-------------|
-| `scan_prompt_for_pii(prompt, options?)` | Local PII scanning (email, phone, SSN, credit card) |
-| `evaluate_pre_invocation_gate(source, input, options?)` | Pre-invocation policy evaluation |
-| `with_governance_gate(source, input, invoke, options?)` | Gate + invoke wrapper |
-| `create_governance_gate_evaluator(...)` | Custom evaluator factory |
-
-See [python/api-reference.md](references/python/api-reference.md) for the complete API surface and type definitions.
-
 ---
 
 ## GovernanceContext (required on every call)
-
-See [shared/concepts.md](references/shared/concepts.md#governancecontext) for full field reference.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -132,105 +85,74 @@ See [shared/concepts.md](references/shared/concepts.md#governancecontext) for fu
 | `session_id` | `string` | no | Session grouping |
 | `tags` | `dict/object` | no | Arbitrary key-value tags |
 
+## aiSystemId Propagation
+
+Optional `aiSystemId` set at config level is auto-forwarded through all platform-managed surfaces: `governedInvoke`, `agents.run`, governance gate telemetry, `events.create`, `evaluatePolicy`, `risk.evaluate`, `proofs.create`, and MCP evaluations.
+
+**Precedence**: per-call > `createArelis({ aiSystemId })` > `platform: { aiSystemId }` > omitted.
+
+**Compatibility**: `evaluatePolicy` retries once without `aiSystemId` on HTTP 400 for backward compat.
+
 ---
 
 ## Key Conventions (TypeScript)
 
-- Import only from `@arelis-ai/ai-governance-sdk` (umbrella package)
-- Named exports only — no default exports; use `type` imports for types
-- Prefer `createArelis({ platform })` for new integrations (SDK `1.2.1+`)
-- `ArelisPlatform` base URL defaults to `https://api.arelis.digital` when omitted
-- Managed PII config: `arelis.governance.getPiiConfig({ namespace? })` (default: `pii.default`)
-- `withGovernanceGate` accepts an `ArelisPlatform` directly
-- Gate decisions include timings in `decision.metadata.timings` (`scanMs`, `policyEvalMs`, `totalMs`)
-- Non-fatal side-effect failures surface in `result.warnings` instead of throwing
-- **Always `await` platform calls** — use `.catch()` in serverless runtimes
-- **Always include `aiSystemId`** on every `platform.events.create()` call
+- Import only from `@arelis-ai/ai-governance-sdk`; named exports only, `type` imports for types
+- Prefer `createArelis({ platform, aiSystemId })` — SDK auto-forwards to all surfaces
+- `ArelisPlatform` base URL defaults to `https://api.arelis.digital`
+- `withGovernanceGate` accepts `ArelisPlatform` directly; gate decisions include `timings`
+- Non-fatal failures surface in `result.warnings`; **always `await` platform calls**
 - `createCompositeSink` takes an **array** — NOT spread args
-- Next.js: add package to `serverExternalPackages`; create `src/instrumentation.ts` polyfill
-- Gemini 3: always pass `rawParts` verbatim (preserves thoughtSignature)
-
-See [typescript/setup-patterns.md](references/typescript/setup-patterns.md) and [typescript/governance-patterns.md](references/typescript/governance-patterns.md) for detailed patterns.
+- `ArelisClient` has NO `client.policy` — export `PolicyEngine` directly for custom checkpoints
 
 ## Key Conventions (Python)
 
-- **Install**: `pip install ai-governance-sdk` (PyPI name is `ai-governance-sdk`, NOT `arelis`)
-- Import from `arelis`: `from arelis import create_arelis, GovernedInvokeInput`
-- **Prefer `create_arelis` + `governed_invoke`** — handles PII redaction, policy gate, event reporting, and risk automatically
-- `governed_invoke` accepts sync or async `invoke` callable; SDK handles both
-- `deny_mode="return"` (default) returns `invoked=False`; `deny_mode="throw"` raises `GovernanceGateDeniedError`
-- `GovernedInvokeResult` includes: `run_id`, `invoked`, `decision`, `sanitized_prompt`, `result`, `risk`, `warnings`
-- `agents.run()` provides multi-step governed agent loops with tool execution, causal graph, and proof generation
-- `governance.get_pii_config()` fetches managed PII configuration from the platform
-- `create_arelis_platform` is still available for low-level manual orchestration
-- Platform calls are synchronous — do NOT use `await`; use try/except to log and swallow errors
-- `evaluate_pre_invocation_gate(source=...)` and `with_governance_gate(source=...)` require an `ArelisPlatform` instance as the source (use `arelis.platform`, not `arelis`)
-- Valid platform policy actions: `"allow"`, `"deny"`, `"warn"`, `"escalate"` (`"require_approval"` is local policy engine only, not valid for platform API)
-- For manual pipeline: `startCausalGraph()` BEFORE `graphs.commit()`
-- Gemini 3: pass raw response parts verbatim to preserve thoughtSignature fields
-
-See [python/model-patterns.md](references/python/model-patterns.md) and [python/api-reference.md](references/python/api-reference.md) for detailed patterns and full type definitions.
+- **Install**: `pip install ai-governance-sdk` (NOT `arelis`); import from `arelis`
+- Prefer `create_arelis` + `governed_invoke` — handles PII, policy, events, risk automatically
+- `governed_invoke` accepts sync or async `invoke`; `deny_mode="return"` (default) or `"throw"`
+- Platform calls are synchronous — do NOT `await`; use try/except to swallow errors
+- `source=arelis.platform` (not `arelis`) for gate functions
+- Valid platform actions: `"allow"`, `"deny"`, `"warn"`, `"escalate"`
+- `startCausalGraph()` BEFORE `graphs.commit()`
 
 ---
 
-## Common Tasks (TypeScript)
+## TypeScript Reference Files
 
-| Task | Reference File |
-|------|---------------|
-| Singleton setup, Next.js integration, ReadableStream route | [typescript/setup-patterns.md](references/typescript/setup-patterns.md) |
-| governedInvoke, basic model calls, streaming, structured output | [typescript/model-patterns.md](references/typescript/model-patterns.md) |
-| Governance gates, PII, policy checkpoints, function calling | [typescript/governance-patterns.md](references/typescript/governance-patterns.md) |
-| Platform events, risk, proofs, causal graphs, post-stream pipeline | [typescript/platform-pipeline.md](references/typescript/platform-pipeline.md) |
-| Agent runtime, tools, MCP, KB RAG, approvals | [typescript/agent-tool-patterns.md](references/typescript/agent-tool-patterns.md) |
-| Memory, quotas, secrets, data sources, OTel, compliance | [typescript/state-patterns.md](references/typescript/state-patterns.md) |
-| Testing with mocks | [typescript/testing.md](references/typescript/testing.md) |
-| Complete API reference | [typescript/api-reference.md](references/typescript/api-reference.md) |
+| Task | Reference | Examples |
+|------|-----------|----------|
+| Singleton setup, AI system registration | [setup-patterns.md](references/typescript/setup-patterns.md) | [examples/setup-and-registration.md](references/typescript/examples/setup-and-registration.md) |
+| Next.js integration, ReadableStream | [setup-nextjs.md](references/typescript/setup-nextjs.md) | — |
+| governedInvoke, model calls | [model-patterns.md](references/typescript/model-patterns.md) | [examples/governed-invoke.md](references/typescript/examples/governed-invoke.md) |
+| PII scanning, policy creation | [governance-patterns.md](references/typescript/governance-patterns.md) | [examples/pii-and-policy.md](references/typescript/examples/pii-and-policy.md) |
+| Governance gates (standalone) | [governance-patterns.md](references/typescript/governance-patterns.md) | [examples/governance-gate.md](references/typescript/examples/governance-gate.md) |
+| Function calling, NDJSON streaming | [governance-function-calling.md](references/typescript/governance-function-calling.md) | — |
+| agents.run, multi-step tool loops | [agent-tool-patterns.md](references/typescript/agent-tool-patterns.md) | [examples/agents-run.md](references/typescript/examples/agents-run.md) |
+| Platform events, risk, proofs, graphs | [platform-pipeline.md](references/typescript/platform-pipeline.md) | [examples/platform-pipeline.md](references/typescript/examples/platform-pipeline.md) |
+| Memory, quotas, secrets, OTel | [state-patterns.md](references/typescript/state-patterns.md) | [examples/low-level-runtime.md](references/typescript/examples/low-level-runtime.md) |
+| Low-level runtime, agent runtime, MCP, KB RAG | [api-reference-runtime.md](references/typescript/api-reference-runtime.md) | [examples/low-level-runtime-advanced.md](references/typescript/examples/low-level-runtime-advanced.md) |
+| Error handling, compliance replay | [api-reference-utilities.md](references/typescript/api-reference-utilities.md) | [examples/error-handling-compliance.md](references/typescript/examples/error-handling-compliance.md) |
+| Testing with mocks | [testing.md](references/typescript/testing.md) | — |
+| API reference (core types) | [api-reference-core.md](references/typescript/api-reference-core.md) | — |
+| API reference (platform) | [api-reference-platform.md](references/typescript/api-reference-platform.md) | — |
 
-## Common Tasks (Python)
+## Python Reference Files
 
-| Task | Reference File |
-|------|---------------|
-| Installation, create_arelis, singleton patterns, web frameworks | [python/setup-patterns.md](references/python/setup-patterns.md) |
-| governed_invoke, model calls with Gemini/Claude/OpenAI, streaming | [python/model-patterns.md](references/python/model-patterns.md) |
-| PII scanning, policy CRUD, governance gates, BeforeToolCall/AfterToolResult | [python/governance-patterns.md](references/python/governance-patterns.md) |
-| Events, risk, proofs, causal graphs, post-stream pipeline | [python/platform-pipeline.md](references/python/platform-pipeline.md) |
-| Governed agent loop with Gemini function calling | [python/agent-tool-patterns.md](references/python/agent-tool-patterns.md) |
-| Pytest patterns, mocking platform client | [python/testing.md](references/python/testing.md) |
-| Complete Python API surface and type definitions | [python/api-reference.md](references/python/api-reference.md) |
+| Task | Reference | Examples |
+|------|-----------|----------|
+| Installation, create_arelis, web frameworks | [setup-patterns.md](references/python/setup-patterns.md) | [examples/setup-and-registration.md](references/python/examples/setup-and-registration.md) |
+| governed_invoke, Gemini/Claude/OpenAI | [model-patterns.md](references/python/model-patterns.md) | [examples/governed-invoke.md](references/python/examples/governed-invoke.md) |
+| PII scanning, BeforeToolCall/AfterToolResult | [governance-patterns.md](references/python/governance-patterns.md) | [examples/pii-and-policy.md](references/python/examples/pii-and-policy.md) |
+| Governance gates (standalone + manual) | [governance-patterns.md](references/python/governance-patterns.md) | [examples/governance-gate.md](references/python/examples/governance-gate.md) |
+| agents.run, governed agent loop | [agent-tool-patterns.md](references/python/agent-tool-patterns.md) | [examples/agents-run.md](references/python/examples/agents-run.md) |
+| Platform policy CRUD | [governance-patterns.md](references/python/governance-patterns.md) | [examples/policy-crud.md](references/python/examples/policy-crud.md) |
+| Events, evaluatePolicy, risk | [platform-pipeline.md](references/python/platform-pipeline.md) | [examples/platform-events-risk.md](references/python/examples/platform-events-risk.md) |
+| Causal graphs, proofs, post-stream pipeline | [platform-pipeline.md](references/python/platform-pipeline.md) | [examples/graphs-proofs-pipeline.md](references/python/examples/graphs-proofs-pipeline.md) |
+| MCP, quotas, error handling | [api-reference.md](references/python/api-reference.md) | [examples/mcp-quotas-errors.md](references/python/examples/mcp-quotas-errors.md) |
+| Testing with mocks | [testing.md](references/python/testing.md) | — |
 
 ## Shared Reference Files
 
-- [shared/platform-api.md](references/shared/platform-api.md) — platform namespaces, event shapes, AI system registration, common event types
-- [shared/policies.md](references/shared/policies.md) — policy JSON rules, checkpoint concepts, enforcement modes, complete audit event type catalog (100+ types), DataRef shapes
-- [shared/concepts.md](references/shared/concepts.md) — GovernanceContext fields, architecture differences, causal graphs, risk, proofs, PII scanning, post-stream pipeline overview
-
-## Policy Engines (TypeScript)
-
-See [typescript/governance-patterns.md](references/typescript/governance-patterns.md) for full policy engine patterns.
-
-PolicyDecision effects: `'allow'` | `'block'` | `'transform'` | `'require_approval'`
-
-Checkpoints: `BeforePrompt` | `AfterModelOutput` | `BeforeToolCall` | `AfterToolResult` | `BeforePersist` | `BeforeOperation` | `BeforeProvision` | `BeforeDestroy` | `BeforeConfigChange` | `BeforeAuth` | `BeforeAgentStep`
-
-## Error Handling
-
-See [typescript/api-reference.md](references/typescript/api-reference.md) for TypeScript error types and [python/api-reference.md](references/python/api-reference.md) for Python error types.
-
-Both SDKs provide typed error classes: `PolicyBlockedError`, `PolicyApprovalRequiredError`, `EvaluationBlockedError`, `GovernanceGateDeniedError`, `ProviderError`, `ToolError`, `ArelisTimeoutError` — with corresponding `is_*_error()` guard functions.
-
-## End-to-End Examples
-
-Complete working demos covering the full governance lifecycle:
-
-- [examples/test-platform-first-governance.ts](examples/test-platform-first-governance.ts) — TypeScript: `createArelis`, managed PII config, `governedInvoke`, `agents.run`, warnings, timings
-- [examples/test-developer-value.py](examples/test-developer-value.py) — Python: `create_arelis`, `governed_invoke`, direct google-genai + anthropic calls, governed agent loop
-
-## Validation Scripts
-
-```bash
-# TypeScript project validation
-python .claude/skills/arelis-sdk/scripts/validate_governance_setup.py --project-dir . --lang ts
-
-# Python project validation
-python .claude/skills/arelis-sdk/scripts/validate_python_setup.py --project-dir .
-```
+- [shared/platform-api.md](references/shared/platform-api.md) — platform namespaces, event shapes, AI system registration
+- [shared/policies.md](references/shared/policies.md) — policy rules, checkpoints, enforcement modes, 100+ audit event types
+- [shared/concepts.md](references/shared/concepts.md) — GovernanceContext, causal graphs, risk, proofs, PII scanning

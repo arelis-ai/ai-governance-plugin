@@ -21,7 +21,11 @@ arelis = create_arelis({
     "platform": {
         "apiKey": "ak_sandbox_...",                # ARELIS_API_KEY
         "baseUrl": "https://api.arelis.digital",   # optional, this is the default
-    }
+    },
+    # Optional: set default aiSystemId that auto-propagates through governed_invoke,
+    # agents.run, governance gate, platform events, proofs, risk, and MCP evaluations.
+    # Can be overridden per-call via GovernedInvokeInput(ai_system_id=...).
+    "aiSystemId": "ais_...",                       # optional
 })
 ```
 
@@ -50,6 +54,7 @@ result: GovernedInvokeResult = await arelis.governed_invoke(GovernedInvokeInput(
     actor=ActorRef | None,                  # optional — {"type": "human", "id": "user_1"}
     context=GovernanceContext | None,        # optional — org, purpose, environment
     policy_ids=list[str] | None,            # optional — specific policies to evaluate
+    ai_system_id=str | None,               # optional — overrides config default
     pii_namespace=str | None,               # optional — PII config namespace
     deny_mode="return" | "throw" | None,    # optional — default: "return"
     include_risk=bool | None,               # optional — default: True
@@ -108,6 +113,7 @@ result: GovernedAgentRunResult = await arelis.agents.run(GovernedAgentRunInput(
     actor=ActorRef | None,                              # optional
     context=GovernanceContext | None,                    # optional
     policy_ids=list[str] | None,                        # optional
+    ai_system_id=str | None,                            # optional — overrides config default
     pii_namespace=str | None,                           # optional
     deny_mode="return" | "throw" | None,                # optional
     max_steps=int | None,                               # optional — default: 8
@@ -196,6 +202,7 @@ decision = await evaluate_pre_invocation_gate(
         actor=ActorRef(type="human", id="user_1"),
         run_id="run-123",           # optional
         model="gemini-2.5-flash",   # optional
+        ai_system_id="ais_...",     # optional — forwarded to platform policy evaluation
         policy_ids=["policy-1"],    # optional
         context=ctx,                # optional
     ),
@@ -214,6 +221,7 @@ result = await with_governance_gate(
     input=EvaluatePreInvocationGateInput(
         prompt="User prompt",
         actor=ActorRef(type="human", id="user_1"),
+        ai_system_id="ais_...",  # optional — forwarded to gate telemetry events
     ),
     invoke=lambda: call_model(prompt),
     options=WithGovernanceGateOptions(
@@ -322,6 +330,7 @@ platform.events.create({
 ```python
 result = platform.governance.evaluatePolicy({
     "runId": str,
+    "aiSystemId": str,       # optional — routes to specific AI system
     "checkpoint": {
         "content": dict,    # e.g. {"pii_detected": True, "pii_types": [...]}
     },

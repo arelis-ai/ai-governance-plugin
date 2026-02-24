@@ -81,6 +81,7 @@ def run_post_stream_pipeline(
     try:
         platform.governance.evaluatePolicy({
             "runId": run_id,
+            "aiSystemId": ai_system_id,
             "checkpoint": {
                 "type": "AfterModelOutput",
                 "content": {"output_length": len(total_output)},
@@ -140,7 +141,7 @@ def run_post_stream_pipeline(
 ## Event Reporting Conventions
 
 - **Platform calls are synchronous** — do NOT use `await`; use try/except to swallow errors
-- **Always include `aiSystemId`** on every `events.create()` call
+- **Set `aiSystemId` at config level** (`create_arelis({ "aiSystemId": ... })`) — it auto-propagates through `governed_invoke`, `agents.run`, gate telemetry, events, proofs, risk, and `evaluatePolicy`. For manual pipeline calls, include `"aiSystemId"` explicitly.
 - **Generate unique `runId`** per request: `f"run-chat-{uuid.uuid4()}"`
 - **Store platform as module-level singleton**
 - Log errors but never surface them to users

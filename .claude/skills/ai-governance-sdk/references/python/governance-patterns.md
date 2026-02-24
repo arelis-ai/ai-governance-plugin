@@ -43,6 +43,7 @@ decision = await evaluate_pre_invocation_gate(
         actor=ActorRef(type="human", id="user_1"),
         run_id="run-123",
         model="gemini-2.5-flash",
+        ai_system_id="ais_...",     # optional — forwarded to platform policy evaluation
         policy_ids=["pii-deny"],    # optional — specific policies
         context=ctx,                 # optional — GovernanceContext
     ),
@@ -67,6 +68,7 @@ result = await with_governance_gate(
     input=EvaluatePreInvocationGateInput(
         prompt="User prompt",
         actor=ActorRef(type="human", id="user_1"),
+        ai_system_id="ais_...",  # optional — forwarded to gate telemetry events
     ),
     invoke=lambda: call_model(prompt),
     options=WithGovernanceGateOptions(
@@ -234,6 +236,7 @@ def manual_pre_invocation_gate(
 
     eval_result = platform.governance.evaluatePolicy({
         "runId": run_id,
+        "aiSystemId": ai_system_id,
         "checkpoint": {
             "content": {
                 "pii_detected": pii["has_pii"],
