@@ -54,12 +54,14 @@ ctx = {
 
 Use `createArelis` by default. For low-level control, keep split `createArelisClient` + `ArelisPlatform`.
 
-### Python: Platform-Only Pattern
-- **`create_arelis_platform`** — platform client (same API surface as TypeScript's `ArelisPlatform`)
-- **No local governance client** — Python apps call model providers directly (google-genai, anthropic, openai)
-- Governance is applied by: (1) calling `governance.evaluatePolicy()` before/after model calls, (2) emitting events, (3) building causal graphs
+### Python: Unified + Platform Patterns
+- **`create_arelis`** — unified orchestrator (`governed_invoke`, `agents.run`, `governance.get_pii_config`) for high-level model invocations with built-in PII redaction, policy gate, event reporting, and risk evaluation
+- **`create_arelis_platform`** — low-level platform client (same API surface as TypeScript's `ArelisPlatform`)
+- **No local governance client** — Python apps call model providers directly (google-genai, anthropic, openai) inside the `invoke` callable
+- With `governed_invoke`: PII scanning, policy evaluation, event reporting, and risk are handled automatically
+- With `create_arelis_platform` (manual): governance is applied by (1) calling `governance.evaluatePolicy()` before/after model calls, (2) emitting events, (3) building causal graphs
 
-The Python SDK is a thin client over the platform REST API. All governance logic (PII scanning, policy evaluation) happens server-side on the Arelis platform.
+Use `create_arelis` + `governed_invoke` by default. For low-level control or streaming, use `create_arelis_platform` directly.
 
 ---
 
@@ -102,7 +104,7 @@ Both SDKs support scanning prompts and tool arguments for personally identifiabl
 - Email addresses
 - Credit card numbers
 
-In TypeScript, use `scanPromptForPii()` and managed config from `governance.getPiiConfig({ namespace? })` (`pii.default` by default). In Python, implement regex-based scanning locally or rely on platform-side `evaluatePolicy()` with PII checkpoint data.
+In TypeScript, use `scanPromptForPii()` and managed config from `governance.getPiiConfig({ namespace? })` (`pii.default` by default). In Python, use `scan_prompt_for_pii()` from the SDK and managed config from `governance.get_pii_config()`. Both `governed_invoke` (TS and Python) handle PII scanning and redaction automatically.
 
 ---
 

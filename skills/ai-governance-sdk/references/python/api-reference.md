@@ -7,101 +7,320 @@ Complete API surface for the `arelis` Python package.
 ## Installation
 
 ```bash
-pip install arelis
+pip install ai-governance-sdk
 ```
 
 ---
 
-## Client Creation
+## Unified Client (Recommended)
+
+```python
+from arelis import create_arelis
+
+arelis = create_arelis({
+    "platform": {
+        "apiKey": "ak_sandbox_...",                # ARELIS_API_KEY
+        "baseUrl": "https://api.arelis.digital",   # optional, this is the default
+    }
+})
+```
+
+### Unified Namespaces
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `arelis.governed_invoke()` | `governed_invoke(GovernedInvokeInput)` | High-level orchestrated model invocation |
+| `arelis.agents.run()` | `run(GovernedAgentRunInput)` | Multi-step governed agent loop |
+| `arelis.governance.get_pii_config()` | `get_pii_config(GetPiiConfigOptions?)` | Managed PII config from platform |
+| `arelis.platform` | All platform namespaces | Low-level platform API access |
+| `arelis.runtime` | `ArelisClient` or `None` | Local runtime client (if configured) |
+
+---
+
+### governed_invoke
+
+```python
+from arelis import GovernedInvokeInput, GovernedInvokeResult
+
+result: GovernedInvokeResult = await arelis.governed_invoke(GovernedInvokeInput(
+    model=str,                              # required — model identifier
+    prompt=str,                             # required — the prompt/input to send
+    invoke=Callable[[str], Any],            # required — sync or async callable
+    run_id=str | None,                      # optional — auto-generated if omitted
+    actor=ActorRef | None,                  # optional — {"type": "human", "id": "user_1"}
+    context=GovernanceContext | None,        # optional — org, purpose, environment
+    policy_ids=list[str] | None,            # optional — specific policies to evaluate
+    pii_namespace=str | None,               # optional — PII config namespace
+    deny_mode="return" | "throw" | None,    # optional — default: "return"
+    include_risk=bool | None,               # optional — default: True
+))
+```
+
+**Orchestration steps** (all automatic):
+1. Generates `run_id` if not provided
+2. Loads PII config from platform (`pii_namespace` or default)
+3. Redacts PII from prompt using managed config
+4. Evaluates pre-invocation governance gate
+5. If denied: returns `invoked=False` (or raises `GovernanceGateDeniedError` if `deny_mode="throw"`)
+6. If allowed: calls `invoke(sanitized_prompt)`
+7. Reports events to platform (request, response/error, blocked)
+8. Evaluates risk based on policy decisions
+9. Returns `GovernedInvokeResult`
+
+### GovernedInvokeResult
+
+```python
+result.run_id: str                              # unique run identifier
+result.invoked: bool                            # whether the model was actually invoked
+result.decision: PreInvocationGateDecision      # policy decision details
+result.sanitized_prompt: str                    # PII-redacted prompt
+result.result: T | None                         # model response (None if denied)
+result.risk: RiskEvaluationResponse | None      # risk assessment result
+result.warnings: list[str] | None               # non-fatal warnings during execution
+```
+
+### PreInvocationGateDecision
+
+```python
+decision.run_id: str
+decision.decision: "allow" | "deny"
+decision.pii: PromptPiiScanResult               # {has_pii, findings}
+decision.policy: PolicySummaryInfo               # {allowed, decisions, summary}
+decision.metadata: PreInvocationGateMetadata     # {policy_ids, actor, model, timings}
+decision.reasons: list[str]
+decision.codes: list[str]
+```
+
+---
+
+### agents.run
+
+```python
+from arelis import GovernedAgentRunInput, GovernedAgentRunResult, GovernedAgentTool
+
+result: GovernedAgentRunResult = await arelis.agents.run(GovernedAgentRunInput(
+    model=str,                                          # required
+    prompt=str,                                         # required
+    tools=list[GovernedAgentTool],                      # required
+    invoke_model=Callable[[dict], Any],                 # required — sync or async
+    execute_tool_call=Callable[[dict], Any],            # required — sync or async
+    run_id=str | None,                                  # optional
+    actor=ActorRef | None,                              # optional
+    context=GovernanceContext | None,                    # optional
+    policy_ids=list[str] | None,                        # optional
+    pii_namespace=str | None,                           # optional
+    deny_mode="return" | "throw" | None,                # optional
+    max_steps=int | None,                               # optional — default: 8
+    include_risk=bool | None,                           # optional
+    proof_schema_version=str | None,                    # optional
+    map_output=Callable[[dict], TOutput] | None,        # optional
+))
+```
+
+### GovernedAgentRunResult
+
+```python
+result.run_id: str
+result.status: GovernedAgentRunStatus           # completion status
+result.decision: PreInvocationGateDecision      # gate decision
+result.sanitized_prompt: str
+result.steps: list[GovernedAgentStep]           # step-by-step execution trace
+result.events: list[AuditEvent]                 # local audit events
+result.graph: CausalGraph                       # causal lineage graph
+result.output: TOutput | None                   # final output (via map_output)
+result.platform_events: list[EventRecord] | None
+result.platform_graph: CausalGraphResponse | None
+result.proof: GovernedProofResult | None        # {request, record}
+result.risk: RiskEvaluationResponse | None
+result.warnings: list[str] | None
+```
+
+### GovernedAgentTool
+
+```python
+from arelis import GovernedAgentTool
+
+tool = GovernedAgentTool(
+    name="search_kb",
+    description="Search knowledge base",
+    schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+)
+```
+
+---
+
+### governance.get_pii_config
+
+```python
+from arelis import GetPiiConfigOptions
+
+config = await arelis.governance.get_pii_config(GetPiiConfigOptions(namespace="pii.default"))
+# Returns: RedactorConfig with detect_emails, detect_phones, etc.
+```
+
+---
+
+## Standalone Governance Functions
+
+These functions can be used independently without `create_arelis`:
+
+### scan_prompt_for_pii
+
+```python
+from arelis import scan_prompt_for_pii, ScanPromptForPiiOptions
+
+result = scan_prompt_for_pii("Contact john@example.com or call 555-123-4567")
+# result.has_pii = True
+# result.findings = [PromptPiiFinding(type="email", ...), PromptPiiFinding(type="phone", ...)]
+
+# With options
+result = scan_prompt_for_pii(text, ScanPromptForPiiOptions(
+    detect_emails=True,
+    detect_phones=True,
+    detect_ssns=True,
+    detect_credit_cards=True,
+    redactor=None,            # optional custom redactor
+    redactor_config=None,     # optional redactor config
+))
+```
+
+### evaluate_pre_invocation_gate
+
+```python
+from arelis import evaluate_pre_invocation_gate, EvaluatePreInvocationGateInput
+
+decision = await evaluate_pre_invocation_gate(
+    source=arelis,  # or platform, or a GovernanceGateEvaluator
+    input=EvaluatePreInvocationGateInput(
+        prompt="User prompt here",
+        actor={"type": "human", "id": "user_1"},
+        run_id="run-123",           # optional
+        model="gemini-2.5-flash",   # optional
+        policy_ids=["policy-1"],    # optional
+        context=ctx,                # optional
+    ),
+    options=ScanPromptForPiiOptions(),  # optional
+)
+# Returns: PreInvocationGateDecision
+```
+
+### with_governance_gate
+
+```python
+from arelis import with_governance_gate, WithGovernanceGateOptions
+
+result = await with_governance_gate(
+    source=arelis,
+    input=EvaluatePreInvocationGateInput(
+        prompt="User prompt",
+        actor={"type": "human", "id": "user_1"},
+    ),
+    invoke=lambda: call_model(prompt),
+    options=WithGovernanceGateOptions(
+        deny_mode="return",       # "return" or "throw"
+        detect_emails=True,
+        detect_phones=True,
+        detect_ssns=True,
+        detect_credit_cards=True,
+    ),
+)
+# Returns: WithGovernanceGateResult[T] — {run_id, invoked, decision, result, warnings}
+```
+
+### create_governance_gate_evaluator
+
+```python
+from arelis import create_governance_gate_evaluator
+
+evaluator = create_governance_gate_evaluator(
+    evaluate_policy=my_policy_eval_fn,
+    resolve_context=my_context_resolver,      # optional
+    get_policy_metadata=my_metadata_fn,       # optional
+)
+```
+
+---
+
+## Error Types
+
+```python
+from arelis import (
+    ArelisError,
+    PolicyBlockedError,
+    PolicyApprovalRequiredError,
+    EvaluationBlockedError,
+    GovernanceGateDeniedError,
+    ProviderError,
+    ToolError,
+    ArelisTimeoutError,
+    ArelisApiError,
+    # Guard functions
+    is_arelis_error,
+    is_policy_blocked_error,
+    is_policy_approval_required_error,
+    is_evaluation_blocked_error,
+    is_governance_gate_denied_error,
+    is_provider_error,
+    is_tool_error,
+    is_arelis_timeout_error,
+)
+```
+
+---
+
+## Platform Client (Low-Level)
 
 ```python
 from arelis import create_arelis_platform
 
 platform = create_arelis_platform({
-    "base_url": "https://api.arelis.digital",  # ARELIS_API_URL
-    "api_key": "ak_sandbox_...",                # ARELIS_API_KEY
+    "baseUrl": "https://api.arelis.digital",  # ARELIS_API_URL
+    "apiKey": "ak_sandbox_...",                # ARELIS_API_KEY
     "max_retries": 2,                           # default: 3
     "timeout": 15_000,                          # ms, default: 30_000
 })
 ```
 
----
+### Platform Namespaces
 
-## Platform Namespaces
+| Namespace | Key Methods |
+|-----------|-------------|
+| `platform.events` | `create()`, `createBatch()`, `list()`, `get()`, `count()` |
+| `platform.ai_systems` | `register()`, `list()`, `get()`, `update()`, `archive()`, `set_default()`, `summary()` |
+| `platform.governance` | `evaluatePolicy()`, `getPiiConfig()`, `listPolicyEvaluations()`, `getSnapshot()` |
+| `platform.governance.policies` | `create()`, `list()`, `get()`, `update()`, `delete()`, `restore()`, `createVersion()`, `listVersions()`, `activateVersion()`, `transition()`, `rollback()`, `simulate()`, `bulkSimulate()`, `impact()` |
+| `platform.risk` | `evaluate()`, `getConfig()`, `updateConfig()`, `listDecisions()`, `simulate()`, `saveDraft()`, `clearDraft()`, `publishDraft()`, `rollbackConfig()` |
+| `platform.graphs` | `list()`, `get()`, `commit()`, `lineage()` |
+| `platform.replay` | `start()`, `startCausalGraph()`, `get()`, `list()`, `createTemplate()`, `listTemplates()`, `compare()` |
+| `platform.proofs` | `create()`, `get()`, `verify()`, `list()` |
+| `platform.exports` | `create()`, `list()`, `get()`, `download()` |
+| `platform.jobs` | `list()`, `get()`, `retry()` |
+| `platform.approvals` | `list()`, `resolve()`, `getConfig()`, `updateConfig()` |
+| `platform.mcpServers` | `create()`, `list()`, `get()`, `update()`, `archive()`, `createTool()`, `listTools()`, `refreshTools()`, `healthCheck()`, `linkSystem()` |
+| `platform.apiKeys` | `create()`, `list()`, `update()`, `revoke()`, `rotate()` |
+| `platform.usage` | `get()`, `history()` |
+| `platform.billing` | `summary()` |
+| `platform.telemetry` | `reportUsage()`, `submitAttestation()`, `listReports()`, `listChallenges()` |
 
-### events
+### events.create
 
 ```python
 await platform.events.create({
     "runId": str,           # required
     "aiSystemId": str,      # required
     "eventType": str,       # required (e.g. "model.invoked")
-    "actor": {"type": str, "id": str},   # required
-    "resource": {"type": str, "id": str}, # required
-    "action": str,          # required
-    "timestamp": str,       # ISO 8601, required
+    "actor": {"type": str, "id": str},
+    "resource": {"type": str, "id": str},
+    "action": str,
+    "timestamp": str,       # ISO 8601
     "metadata": dict,       # optional
 })
-# Returns: {"id": str, ...}
 ```
 
-### ai_systems
+### governance.evaluatePolicy
 
 ```python
-# Register
-record = await platform.ai_systems.register({
-    "name": str,            # required
-    "type": str,            # required: "model" | "agent" | "pipeline" | "tool_chain"
-    "provider": str,        # optional
-    "modelRef": str,        # optional
-    "version": str,         # optional
-    "description": str,     # optional
-    "config": dict,         # optional
-    "metadata": dict,       # optional
-    "tags": list[str],      # optional
-})
-# Returns: {"id": str, "slug": str, "name": str, "type": str, "status": str, ...}
-
-# List
-result = await platform.ai_systems.list({"type": "model", "status": "active"})
-# Returns: {"data": [AiSystemRecord, ...], "nextCursor": str | None}
-
-# Get
-record = await platform.ai_systems.get(system_id)
-
-# Update
-record = await platform.ai_systems.update(system_id, {"name": "new-name"})
-
-# Archive
-record = await platform.ai_systems.archive(system_id)
-
-# Set default
-record = await platform.ai_systems.set_default(system_id)
-
-# Summary
-summary = await platform.ai_systems.summary(system_id, {"start": "2026-01-01", "end": "2026-02-01"})
-# Returns: {"aiSystem": {...}, "period": {...}, "events": {...}, "risk": {...}, "proofs": {...}}
-```
-
-### governance
-
-```python
-# List policies
-result = await platform.governance.policies.list({"search": "pii"})
-# Returns: {"data": [PolicyRecord, ...]}
-
-# Create policy
-record = await platform.governance.policies.create({
-    "key": str,
-    "name": str,
-    "condition": {"field": str, "operator": str, "value": Any},
-    "action": "allow" | "deny",
-    "severity": "low" | "medium" | "high" | "critical",
-    "priority": int,
-})
-
-# Evaluate policy
-result = await platform.governance.evaluate_policy({
+result = await platform.governance.evaluatePolicy({
     "runId": str,
     "checkpoint": {
         "content": dict,    # e.g. {"pii_detected": True, "pii_types": [...]}
@@ -110,69 +329,75 @@ result = await platform.governance.evaluate_policy({
 # Returns: {"decisions": [{"decision": "allow"|"deny", "policyId": str, "metadata": dict}]}
 ```
 
-### risk
+### risk.evaluate
 
 ```python
 result = await platform.risk.evaluate({
     "runId": str,
     "aiSystemId": str,
     "policyDecisions": list[dict],
-    "quotaState": dict,          # optional
-    "evaluationSignals": dict,   # optional
+    "quotaState": dict,              # optional
+    "evaluationSignals": list[dict], # optional
+    "explicitSignals": dict,         # optional
 })
-# Returns: {"action": str, "score": int, "deterministicInputsHash": str}
+# Returns: {"id": str, "runId": str, "action": str, "score": float, "factors": [...]}
 ```
 
-### graphs
-
-```python
-# Commit causal graph (MUST be called after startCausalGraph)
-result = await platform.graphs.commit(run_id)
-# Returns: {"rootHash": str}
-
-# Get lineage
-result = await platform.graphs.lineage(run_id, node_id)
-# Returns: {"nodes": [...], "edges": [...]}
-```
-
-### replay
+### replay.startCausalGraph / graphs.commit
 
 ```python
 # Start causal graph (MUST be called BEFORE graphs.commit)
-result = await platform.replay.start_causal_graph({
+await platform.replay.startCausalGraph({
     "runId": str,
     "nodes": [{"id": str, "type": str, "data": dict}, ...],
     "edges": [{"source": str, "target": str, "type": "sequence"}, ...],
 })
 
-# Start replay
-result = await platform.replay.start({"runId": str, ...})
-
-# Get replay result
-result = await platform.replay.get(replay_id)
-
-# List replays
-result = await platform.replay.list({"cursor": str, "limit": int})
-
-# Templates
-template = await platform.replay.create_template({...})
-templates = await platform.replay.list_templates({"runId": str})
-template = await platform.replay.get_template(template_id)
+# Commit (ALWAYS LAST)
+result = await platform.graphs.commit(run_id)
+# Returns: {"rootHash": str}
 ```
 
 ### proofs
 
 ```python
-# Create compliance proof
 result = await platform.proofs.create({
     "runId": str,
     "aiSystemId": str,
     "schemaVersion": "v1",
 })
+# Returns: {"proofId": str, "proofHash": str, "layers": [...], ...}
 
-# Verify proof
-result = await platform.proofs.verify({"proofId": str})
+verification = await platform.proofs.verify({"proofId": str})
 # Returns: {"verified": bool, "evidence": dict}
+```
+
+---
+
+## Core Types
+
+```python
+from arelis import (
+    GovernanceContext,
+    ActorRef,
+    OrgRef,
+    ResultEnvelope,
+    RunWarning,
+    generate_run_id,
+)
+```
+
+### GovernanceContext
+
+```python
+GovernanceContext(
+    org=OrgRef(id="org_123", name="Acme"),
+    actor=ActorRef(type="human", id="user_1", email="a@acme.com", roles=["analyst"]),
+    purpose="customer-support",
+    environment="dev",        # "dev" | "staging" | "prod"
+    session_id="sess_abc",    # optional
+    tags={"feature": "chat"}, # optional
+)
 ```
 
 ---
@@ -181,11 +406,14 @@ result = await platform.proofs.verify({"proofId": str})
 
 | Feature | TypeScript | Python |
 |---------|-----------|--------|
-| Local governance client | `createArelisClient()` — full orchestration | Not available |
-| Model calls | Via `client.models.generate()` | Direct provider SDK calls |
-| Policy engine | Local `PolicyEngine` with checkpoints | Platform-side `evaluate_policy()` |
-| Audit sink | Local sink + platform events | Platform events only |
-| PII scanning | `scanPromptForPii()` from SDK | Implement with regex locally |
+| Unified orchestrator | `createArelis()` + `governedInvoke()` | `create_arelis()` + `governed_invoke()` |
+| Agent orchestrator | `arelis.agents.run()` | `arelis.agents.run()` |
+| Managed PII config | `arelis.governance.getPiiConfig()` | `arelis.governance.get_pii_config()` |
+| Governance gate | `withGovernanceGate()` | `with_governance_gate()` |
+| PII scanning | `scanPromptForPii()` | `scan_prompt_for_pii()` |
+| Local governance client | `createArelisClient()` | Not available |
+| Model calls | Via `client.models.generate()` | Direct provider SDK calls in `invoke` callable |
+| Local policy engine | `PolicyEngine` with checkpoints | Platform-side `evaluatePolicy()` |
+| Audit sink | Local sink + platform | Platform events only |
 | Memory/quotas/secrets | Built-in namespaces | Not available (use external stores) |
-| Agent runtime | `createAgentRuntime()` | Implement custom loop |
-| Knowledge base | `createKBRegistry()` + RAG | Use external RAG solutions |
+| Naming convention | camelCase | snake_case (camelCase aliases available) |

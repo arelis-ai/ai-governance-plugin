@@ -1,6 +1,6 @@
 # Python SDK — Setup Patterns
 
-Installation, platform client initialization, AI system registration, and web framework integration.
+Installation, client initialization, AI system registration, and web framework integration.
 
 ---
 
@@ -18,7 +18,45 @@ pip install openai               # OpenAI
 
 ---
 
-## Platform Client Initialization
+## Unified Client Initialization (Recommended)
+
+```python
+import os
+from arelis import create_arelis
+
+# Module-level singleton
+_arelis = None
+
+def get_arelis():
+    global _arelis
+    if _arelis is not None:
+        return _arelis
+
+    api_key = os.environ.get("ARELIS_API_KEY")
+    if not api_key:
+        raise RuntimeError("ARELIS_API_KEY is not set")
+
+    _arelis = create_arelis({
+        "platform": {
+            "apiKey": api_key,
+            **({"baseUrl": os.environ["ARELIS_API_URL"]} if os.environ.get("ARELIS_API_URL") else {}),
+        }
+    })
+    return _arelis
+```
+
+The unified client exposes:
+- `arelis.governed_invoke(...)` — high-level orchestrated model invocation
+- `arelis.agents.run(...)` — multi-step governed agent loop
+- `arelis.governance.get_pii_config(...)` — managed PII configuration from platform
+- `arelis.platform` — low-level platform namespaces (events, governance, risk, graphs, etc.)
+- `arelis.runtime` — local runtime client (if configured with `"runtime"` key)
+
+---
+
+## Platform Client Initialization (Low-Level)
+
+For manual governance orchestration without `governed_invoke`:
 
 ```python
 import os
@@ -40,9 +78,9 @@ def get_arelis_platform():
         raise RuntimeError("ARELIS_API_URL is not set")
 
     _platform = create_arelis_platform({
-        "base_url": base_url,
-        "api_key": api_key,
-        "max_retries": 2,
+        "baseUrl": base_url,
+        "apiKey": api_key,
+        "maxRetries": 2,
         "timeout": 15_000,
     })
     return _platform
@@ -55,7 +93,7 @@ def get_arelis_platform():
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ARELIS_API_KEY` | yes | Platform API key (`ak_sandbox_...` or `ak_prod_...`) |
-| `ARELIS_API_URL` | yes | Platform URL (`https://api.arelis.digital`) |
+| `ARELIS_API_URL` | no | Platform URL (defaults to `https://api.arelis.digital`) |
 | `GEMINI_API_KEY` | if using Gemini | Google Gemini API key |
 | `ANTHROPIC_API_KEY` | if using Anthropic | Anthropic API key |
 | `OPENAI_API_KEY` | if using OpenAI | OpenAI API key |
@@ -103,18 +141,35 @@ async def ensure_ai_system_registered(platform, model_id: str) -> str:
 ```python
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from .governance import get_arelis_platform, ensure_ai_system_registered
+from .governance import get_arelis
+from arelis import GovernedInvokeInput
+from google import genai
 
 MODEL_ID = "gemini-2.5-flash"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Register AI system at startup
-    platform = get_arelis_platform()
-    await ensure_ai_system_registered(platform, MODEL_ID)
+    # Initialize unified client at startup
+    get_arelis()
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+@app.post("/generate")
+async def generate(prompt: str):
+    arelis = get_arelis()
+    gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+    result = await arelis.governed_invoke(GovernedInvokeInput(
+        model=MODEL_ID,
+        prompt=prompt,
+        invoke=lambda s: gemini.models.generate_content(model=MODEL_ID, contents=s).text,
+        deny_mode="return",
+    ))
+
+    if not result.invoked:
+        return {"error": "Blocked by policy", "decision": str(result.decision)}
+    return {"output": result.result, "run_id": result.run_id}
 ```
 
 ---
@@ -129,9 +184,8 @@ class MyAppConfig(AppConfig):
     name = "myapp"
 
     def ready(self):
-        from .governance import get_arelis_platform
-        # Initialize platform singleton at startup
-        get_arelis_platform()
+        from .governance import get_arelis
+        get_arelis()
 ```
 
 ---
@@ -140,11 +194,11 @@ class MyAppConfig(AppConfig):
 
 ```python
 from flask import Flask
-from .governance import get_arelis_platform
+from .governance import get_arelis
 
 app = Flask(__name__)
 
 @app.before_first_request
 def init_governance():
-    get_arelis_platform()
+    get_arelis()
 ```

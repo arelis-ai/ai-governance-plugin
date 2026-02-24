@@ -1,20 +1,150 @@
 # Python SDK — Model Patterns
 
-Direct model provider calls with governance wrapping.
+Model invocation with governance orchestration.
 
 ---
 
-## Key Difference from TypeScript
+## Table of Contents
 
-In Python, there is **no local governance client** (`createArelisClient`). You call model providers directly and use the Arelis platform for governance:
-
-1. Call model provider (google-genai, anthropic, openai) directly
-2. Before the call: evaluate platform policy (PII check)
-3. After the call: emit events, assess risk, build causal graph
+- [Platform-First governed_invoke (Recommended)](#platform-first-governed_invoke-recommended)
+- [Google Gemini — governed_invoke](#google-gemini--governed_invoke)
+- [Anthropic Claude — governed_invoke](#anthropic-claude--governed_invoke)
+- [Manual Governance Wrapping (Low-Level)](#manual-governance-wrapping-low-level)
+- [Streaming (Gemini)](#streaming-gemini)
 
 ---
 
-## Google Gemini — Basic Call
+## Platform-First governed_invoke (Recommended)
+
+Use `create_arelis(...).governed_invoke(...)` for pre-invocation gate + PII redaction + platform reporting in one call:
+
+```python
+import os
+from arelis import create_arelis, GovernedInvokeInput
+
+arelis = create_arelis({
+    "platform": {
+        "apiKey": os.environ["ARELIS_API_KEY"],
+        **({"baseUrl": os.environ["ARELIS_API_URL"]} if os.environ.get("ARELIS_API_URL") else {}),
+    }
+})
+
+result = await arelis.governed_invoke(GovernedInvokeInput(
+    model="gemini-2.5-flash",
+    prompt="Summarize AI governance controls in two bullets.",
+    deny_mode="return",
+    invoke=lambda sanitized_prompt: call_model(sanitized_prompt),
+))
+
+if result.invoked:
+    print(result.result)
+    print(f"Risk: {result.risk}")
+else:
+    print(f"Blocked: {result.decision}")
+
+for warning in result.warnings or []:
+    print(f"Warning: {warning}")
+```
+
+### What governed_invoke handles automatically
+
+1. Generates `run_id` if not provided
+2. Loads PII configuration from platform
+3. Redacts PII from prompt using managed config
+4. Evaluates pre-invocation governance gate
+5. If blocked: returns result with `invoked=False` (or raises if `deny_mode="throw"`)
+6. If allowed: executes the `invoke` callable with sanitized prompt
+7. Reports events to platform (request, response/error, blocked)
+8. Evaluates risk based on policy decisions
+9. Returns complete `GovernedInvokeResult`
+
+---
+
+## Google Gemini — governed_invoke
+
+```python
+import os
+from arelis import create_arelis, GovernedInvokeInput
+from google import genai
+
+arelis = create_arelis({
+    "platform": {
+        "apiKey": os.environ["ARELIS_API_KEY"],
+        **({"baseUrl": os.environ["ARELIS_API_URL"]} if os.environ.get("ARELIS_API_URL") else {}),
+    }
+})
+
+MODEL_ID = "gemini-2.5-flash"
+gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+async def generate_with_governance(prompt: str, user_id: str):
+    result = await arelis.governed_invoke(GovernedInvokeInput(
+        model=MODEL_ID,
+        prompt=prompt,
+        invoke=lambda sanitized: gemini.models.generate_content(
+            model=MODEL_ID, contents=sanitized
+        ).text,
+        actor={"type": "human", "id": user_id},
+        context={
+            "org": {"id": "org_123", "name": "Acme"},
+            "purpose": "chat",
+            "environment": "prod",
+        },
+        deny_mode="return",
+    ))
+
+    if not result.invoked:
+        return None, f"Blocked: {result.decision}"
+
+    return result.result, None
+```
+
+---
+
+## Anthropic Claude — governed_invoke
+
+```python
+import anthropic
+from arelis import create_arelis, GovernedInvokeInput
+
+arelis = create_arelis({
+    "platform": {
+        "apiKey": os.environ["ARELIS_API_KEY"],
+        **({"baseUrl": os.environ["ARELIS_API_URL"]} if os.environ.get("ARELIS_API_URL") else {}),
+    }
+})
+
+claude = anthropic.Anthropic()
+
+async def generate_with_claude(prompt: str, user_id: str):
+    result = await arelis.governed_invoke(GovernedInvokeInput(
+        model="claude-sonnet-4",
+        prompt=prompt,
+        invoke=lambda sanitized: claude.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": sanitized}],
+        ).content[0].text,
+        actor={"type": "human", "id": user_id},
+        context={
+            "org": {"id": "org_123", "name": "Acme"},
+            "purpose": "chat",
+            "environment": "prod",
+        },
+        deny_mode="return",
+    ))
+
+    if not result.invoked:
+        return None, f"Blocked: {result.decision}"
+
+    return result.result, None
+```
+
+---
+
+## Manual Governance Wrapping (Low-Level)
+
+For cases where you need fine-grained control over each governance step, use `create_arelis_platform` directly. This is the low-level pattern — prefer `governed_invoke` for new code.
 
 ```python
 from google import genai
@@ -100,42 +230,9 @@ async def generate_with_governance(prompt: str, user_id: str):
 
 ---
 
-## Anthropic Claude — Basic Call
-
-```python
-import anthropic
-
-async def generate_with_claude(prompt: str, user_id: str):
-    platform = get_arelis_platform()
-    run_id = f"run-chat-{uuid.uuid4()}"
-    ai_system_id = await ensure_ai_system_registered(platform, "claude-sonnet-4")
-
-    client = anthropic.Anthropic()
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    output = message.content[0].text
-
-    # Emit governance events (same pattern as Gemini)
-    await platform.events.create({
-        "runId": run_id,
-        "aiSystemId": ai_system_id,
-        "eventType": "model.invoked",
-        "actor": {"type": "human", "id": user_id},
-        "resource": {"type": "model", "id": "claude-sonnet-4"},
-        "action": "inference",
-        "timestamp": datetime.utcnow().isoformat(),
-        "metadata": {"responseLength": len(output)},
-    })
-
-    return output
-```
-
----
-
 ## Streaming (Gemini)
+
+Streaming still requires manual governance wrapping since `governed_invoke` expects a single return value:
 
 ```python
 async def stream_with_governance(prompt: str, user_id: str):
@@ -143,7 +240,7 @@ async def stream_with_governance(prompt: str, user_id: str):
     run_id = f"run-chat-{uuid.uuid4()}"
     ai_system_id = await ensure_ai_system_registered(platform, MODEL_ID)
 
-    # Pre-invocation policy check (same as above)...
+    # Pre-invocation policy check (same as manual pattern above)...
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     output = ""
