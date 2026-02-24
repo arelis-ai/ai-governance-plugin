@@ -841,33 +841,59 @@ def demo_policy_evaluation(platform) -> None:
 
 
 def demo_risk_evaluation(platform, ai_system_id: str) -> list[dict]:
-    header("12. Risk Evaluation")
-    run_id = f"run-risk-{uuid.uuid4()}"
+    header("12. Risk Evaluation (Low, Medium, High)")
+    results = []
 
-    try:
-        risk = platform.risk.evaluate({
-            "runId": run_id,
-            "aiSystemId": ai_system_id,
-            "policyDecisions": [
-                {"effect": "block", "reason": "PII detected in prompt", "code": "PII_DENY"},
-                {"effect": "block", "reason": "Credential pattern in output", "code": "CRED_LEAK"},
+    scenarios = [
+        {
+            "label": "Low risk",
+            "run_id": f"run-risk-low-{uuid.uuid4()}",
+            "quotaState": {"usageRatio": 0.1},
+            "evaluationSignals": [{"name": "output_check", "value": 0.01, "severity": "low"}],
+            "explicitSignals": {"surface": "model", "outcome": "allowed"},
+        },
+        {
+            "label": "Medium risk",
+            "run_id": f"run-risk-med-{uuid.uuid4()}",
+            "quotaState": {"usageRatio": 0.75},
+            "evaluationSignals": [
+                {"name": "pii_detected", "value": 1, "severity": "high"},
+                {"name": "toxicity_score", "value": 0.6, "severity": "medium"},
             ],
-            "quotaState": {},
-            "evaluationSignals": [],
-            "explicitSignals": {
-                "surface": "model",
-                "outcome": "blocked",
-                "environment": "prod",
-                "contentSafety": "fail",
-                "credentialDetected": True,
-            },
-        })
-        print(f"  Action: {risk.get('action')} | Score: {risk.get('score')}")
-        print(f"  Hash: {risk.get('deterministicInputsHash', 'N/A')[:24]}...")
-        return [{"action": risk.get("action"), "score": risk.get("score")}]
-    except Exception as e:
-        print(f"  Risk evaluation failed: {e}")
-        return [{"action": "error", "score": -1}]
+            "explicitSignals": {"surface": "model", "outcome": "blocked"},
+        },
+        {
+            "label": "High risk",
+            "run_id": f"run-risk-high-{uuid.uuid4()}",
+            "quotaState": {"usageRatio": 0.95},
+            "evaluationSignals": [
+                {"name": "pii_detected", "value": 1, "severity": "high"},
+                {"name": "credential_leak", "value": 1, "severity": "high"},
+                {"name": "toxicity_score", "value": 0.92, "severity": "high"},
+                {"name": "prompt_injection", "value": 0.95, "severity": "high"},
+            ],
+            "explicitSignals": {"surface": "model", "outcome": "blocked", "environment": "prod"},
+        },
+    ]
+
+    for s in scenarios:
+        try:
+            risk = platform.risk.evaluate({
+                "runId": s["run_id"],
+                "aiSystemId": ai_system_id,
+                "policyDecisions": [],
+                "quotaState": s["quotaState"],
+                "evaluationSignals": s["evaluationSignals"],
+                "explicitSignals": s["explicitSignals"],
+            })
+            print(f"  {s['label']}: action={risk.get('action')}, score={risk.get('score')}")
+            results.append({"label": s["label"], "action": risk.get("action"), "score": risk.get("score")})
+        except Exception as e:
+            print(f"  {s['label']}: failed -- {e}")
+            results.append({"label": s["label"], "action": "error", "score": -1})
+
+    print()
+    return results
 
 
 # =========================================================================
@@ -1407,9 +1433,9 @@ async def main() -> None:
         print(f"  Steps: {len(agent_result.steps)}")
         print(f"  Events: {len(agent_result.events)}")
 
-    print(f"\nRisk evaluation:")
+    print(f"\nRisk evaluations:")
     for r in risk_results:
-        print(f"  action={r.get('action', 'N/A')}, score={r.get('score', 'N/A')}")
+        print(f"  {r.get('label', '?'):<15} action={r.get('action', 'N/A'):<10} score={r.get('score', 'N/A')}")
 
     if graph_result:
         print(f"\nCausal graph:")

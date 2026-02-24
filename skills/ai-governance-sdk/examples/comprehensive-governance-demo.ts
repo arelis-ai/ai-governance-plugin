@@ -1318,24 +1318,54 @@ async function section8_manualPipeline(platform: ArelisPlatform, aiSystemId: str
   // ── 8c: Risk Evaluation ────────────────────────────────────────────────────
   section('8c: Risk Evaluation');
 
-  const riskResult = await platform.risk.evaluate({
-    runId,
-    aiSystemId,
-    policyDecisions: [
-      { effect: 'block', reason: 'PII detected in prompt', code: 'PII_DENY' },
-      { effect: 'block', reason: 'Credential pattern in output', code: 'CRED_LEAK' },
-    ],
-    quotaState: {},
-    evaluationSignals: [],
-    explicitSignals: { surface: 'model', outcome: 'blocked', environment: 'prod', contentSafety: 'fail', credentialDetected: true },
-  }).catch((err) => {
-    console.warn(`[Arelis] risk.evaluate: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  });
+  const riskScenarios = [
+    {
+      label: 'Low risk',
+      runId: `${runId}-low`,
+      quotaState: { usageRatio: 0.1 },
+      evaluationSignals: [{ name: 'output_check', value: 0.01, severity: 'low' as const }],
+      explicitSignals: { surface: 'model', outcome: 'allowed' },
+    },
+    {
+      label: 'Medium risk',
+      runId: `${runId}-med`,
+      quotaState: { usageRatio: 0.75 },
+      evaluationSignals: [
+        { name: 'pii_detected', value: 1, severity: 'high' as const },
+        { name: 'toxicity_score', value: 0.6, severity: 'medium' as const },
+      ],
+      explicitSignals: { surface: 'model', outcome: 'blocked' },
+    },
+    {
+      label: 'High risk',
+      runId: `${runId}-high`,
+      quotaState: { usageRatio: 0.95 },
+      evaluationSignals: [
+        { name: 'pii_detected', value: 1, severity: 'high' as const },
+        { name: 'credential_leak', value: 1, severity: 'high' as const },
+        { name: 'toxicity_score', value: 0.92, severity: 'high' as const },
+        { name: 'prompt_injection', value: 0.95, severity: 'high' as const },
+      ],
+      explicitSignals: { surface: 'model', outcome: 'blocked', environment: 'prod' },
+    },
+  ];
 
-  if (riskResult) {
-    console.log(`Risk: action=${riskResult.action}, score=${riskResult.score}`);
-    console.log(`Deterministic hash: ${riskResult.deterministicInputsHash?.slice(0, 16)}...`);
+  for (const scenario of riskScenarios) {
+    const riskResult = await platform.risk.evaluate({
+      runId: scenario.runId,
+      aiSystemId,
+      policyDecisions: [],
+      quotaState: scenario.quotaState,
+      evaluationSignals: scenario.evaluationSignals,
+      explicitSignals: scenario.explicitSignals,
+    }).catch((err) => {
+      console.warn(`[Arelis] risk.evaluate (${scenario.label}): ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    });
+
+    if (riskResult) {
+      console.log(`${scenario.label}: action=${riskResult.action}, score=${riskResult.score}`);
+    }
   }
 
   // ── 8d: Compliance Proof ───────────────────────────────────────────────────
