@@ -283,6 +283,8 @@ async function section3_policySetup(platform: ArelisPlatform): Promise<string> {
 
 async function section4_governedInvoke(
   arelis: ReturnType<typeof createArelis>,
+  platform: ArelisPlatform,
+  aiSystemId: string,
   policyId: string,
 ) {
   header('4) governedInvoke — Blocked & Allowed Paths');
@@ -313,6 +315,23 @@ async function section4_governedInvoke(
     console.log(`Warnings: ${blockedResult.warnings.join(', ')}`);
   }
 
+  // Emit supplementary event with aiSystemId so platform links to AI system
+  await platform.events.create({
+    runId: blockedResult.runId,
+    aiSystemId,
+    eventType: blockedResult.invoked ? 'model.invoked' : 'model_invocation_blocked',
+    actor: { type: 'human', id: ctx.actor.id },
+    resource: { type: 'model', id: model },
+    action: blockedResult.invoked ? 'inference' : 'blocked_by_policy',
+    timestamp: new Date().toISOString(),
+    metadata: {
+      decision: blockedResult.decision.decision,
+      piiDetected: blockedResult.decision.pii.hasPii,
+      piiCount: blockedResult.decision.pii.findings.length,
+      timingsMs: blockedResult.decision.metadata.timings,
+    },
+  }).catch((e) => console.error('[Arelis] supplementary event failed:', e));
+
   // 4b. Allowed scenario (clean prompt)
   section('4b: Allowed Scenario (clean prompt)');
   const allowedResult = await arelis.governedInvoke({
@@ -339,6 +358,35 @@ async function section4_governedInvoke(
   if (allowedResult.warnings?.length) {
     console.log(`Warnings: ${allowedResult.warnings.join(', ')}`);
   }
+
+  // Emit supplementary events with aiSystemId
+  await Promise.all([
+    platform.events.create({
+      runId: allowedResult.runId,
+      aiSystemId,
+      eventType: 'model.invoked',
+      actor: { type: 'human', id: ctx.actor.id },
+      resource: { type: 'model', id: model },
+      action: 'inference',
+      timestamp: new Date().toISOString(),
+      metadata: {
+        decision: allowedResult.decision.decision,
+        responseLength: allowedResult.result?.length ?? 0,
+        riskAction: allowedResult.risk?.action,
+        riskScore: allowedResult.risk?.score,
+      },
+    }),
+    platform.events.create({
+      runId: allowedResult.runId,
+      aiSystemId,
+      eventType: 'output.delivered',
+      actor: { type: 'human', id: ctx.actor.id },
+      resource: { type: 'model', id: model },
+      action: 'deliver',
+      timestamp: new Date().toISOString(),
+      metadata: { outputLength: allowedResult.result?.length ?? 0, containsPII: false },
+    }),
+  ]).catch((e) => console.error('[Arelis] supplementary events failed:', e));
 
   // 4c. Optional Claude scenario
   if (process.env.ANTHROPIC_API_KEY) {
@@ -389,7 +437,7 @@ async function section4_governedInvoke(
 //  SECTION 5 — withGovernanceGate (Standalone)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function section5_standaloneGate(platform: ArelisPlatform) {
+async function section5_standaloneGate(platform: ArelisPlatform, aiSystemId: string) {
   header('5) withGovernanceGate — Standalone Gate');
 
   // 5a. Evaluate pre-invocation gate directly
@@ -429,6 +477,18 @@ async function section5_standaloneGate(platform: ArelisPlatform) {
   for (const warning of gateResult.warnings ?? []) {
     console.warn(`Warning: ${warning}`);
   }
+
+  // Emit supplementary event with aiSystemId
+  await platform.events.create({
+    runId: gateResult.runId,
+    aiSystemId,
+    eventType: 'model.invoked',
+    actor: { type: 'human', id: ctx.actor.id },
+    resource: { type: 'model', id: 'gemini-2.5-flash' },
+    action: 'inference',
+    timestamp: new Date().toISOString(),
+    metadata: { decision: gateResult.decision.decision, gateTimingsMs: gateResult.decision.metadata.timings },
+  }).catch((e) => console.error('[Arelis] supplementary event failed:', e));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -437,6 +497,8 @@ async function section5_standaloneGate(platform: ArelisPlatform) {
 
 async function section6_agentRun(
   arelis: ReturnType<typeof createArelis>,
+  platform: ArelisPlatform,
+  aiSystemId: string,
   policyId: string,
 ) {
   header('6) agents.run — Multi-Step Governed Agent Loop');
@@ -593,6 +655,41 @@ async function section6_agentRun(
     console.log(`Warnings (${result.warnings.length}):`);
     for (const w of result.warnings) console.log(`  - ${w}`);
   }
+
+  // Emit supplementary events with aiSystemId for each agent step
+  const agentEvents = [
+    {
+      eventType: 'model.invoked' as const,
+      action: 'inference',
+      metadata: { steps: result.steps.length, decision: result.decision.decision },
+    },
+    ...result.steps.filter((s: Record<string, unknown>) => s.toolName).map((s: Record<string, unknown>) => ({
+      eventType: 'tool.call' as const,
+      action: 'invoke',
+      metadata: { toolName: s.toolName, step: s.stepNumber },
+    })),
+    {
+      eventType: 'output.delivered' as const,
+      action: 'deliver',
+      metadata: { outputLength: String(result.output ?? '').length },
+    },
+  ];
+
+  await Promise.all(
+    agentEvents.map((ev) =>
+      platform.events.create({
+        runId: result.runId,
+        aiSystemId,
+        eventType: ev.eventType,
+        actor: { type: 'service', id: 'demo-agent' },
+        resource: { type: ev.eventType.startsWith('tool') ? 'tool' : 'model', id: ev.metadata.toolName ?? 'gemini-2.5-flash' },
+        action: ev.action,
+        timestamp: new Date().toISOString(),
+        metadata: ev.metadata as Record<string, unknown>,
+      }),
+    ),
+  ).catch((e) => console.error('[Arelis] agent supplementary events failed:', e));
+  console.log(`Supplementary events emitted: ${agentEvents.length} (with aiSystemId)`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1151,27 +1248,71 @@ async function section8_manualPipeline(platform: ArelisPlatform, aiSystemId: str
         pii_types: [],
       },
     }),
+    platform.events.create({
+      runId,
+      aiSystemId,
+      eventType: 'governance.gate.evaluated',
+      actor: { type: 'human', id: actorId },
+      resource: { type: 'model', id: 'gemini-2.5-flash' },
+      action: 'evaluate',
+      timestamp: new Date().toISOString(),
+      metadata: {
+        pii_detected: true,
+        pii_types: ['ssn', 'email'],
+        pii_count: 2,
+        decision: 'deny',
+      },
+    }),
   ]).catch((err) => console.error('[Arelis] Failed to emit events:', err));
   console.log(`Events emitted for run: ${runId}`);
 
   // ── 8b: Platform Policy Evaluation ─────────────────────────────────────────
   section('8b: Platform Policy Evaluation (evaluatePolicy)');
 
-  const policyEval = await platform.governance.evaluatePolicy({
+  const policyEvalPii = await platform.governance.evaluatePolicy({
     runId,
+    checkpoint: {
+      content: { pii_detected: true, pii_types: ['ssn', 'email'], pii_count: 2 },
+    },
+  }).catch((err) => {
+    console.error('[Arelis] evaluatePolicy (PII) failed:', err);
+    return null;
+  });
+
+  if (policyEvalPii) {
+    console.log(`Policy eval (PII): ${policyEvalPii.decisions?.length ?? 0} decisions`);
+    let denyCount = 0;
+    let allowCount = 0;
+    for (const d of policyEvalPii.decisions ?? []) {
+      const decision = (d as { decision: string }).decision;
+      const name = (d as { metadata?: { policyName?: string } }).metadata?.policyName ?? (d as { policyId: string }).policyId;
+      if (decision === 'deny') denyCount++;
+      else allowCount++;
+      console.log(`  - ${decision} (${name})`);
+    }
+    console.log(`Summary: ${denyCount} deny, ${allowCount} allow`);
+  }
+
+  const policyEvalClean = await platform.governance.evaluatePolicy({
+    runId: `${runId}-clean`,
     checkpoint: {
       content: { pii_detected: false, pii_types: [], pii_count: 0 },
     },
   }).catch((err) => {
-    console.error('[Arelis] evaluatePolicy failed:', err);
+    console.error('[Arelis] evaluatePolicy (clean) failed:', err);
     return null;
   });
 
-  if (policyEval) {
-    console.log(`Policy eval: ${policyEval.decisions?.length ?? 0} decisions`);
-    for (const d of policyEval.decisions ?? []) {
-      console.log(`  - ${(d as { decision: string }).decision} (policy: ${(d as { policyId: string }).policyId})`);
+  if (policyEvalClean) {
+    console.log(`\nPolicy eval (clean): ${policyEvalClean.decisions?.length ?? 0} decisions`);
+    let denyCount = 0;
+    let allowCount = 0;
+    for (const d of policyEvalClean.decisions ?? []) {
+      const decision = (d as { decision: string }).decision;
+      if (decision === 'deny') denyCount++;
+      else allowCount++;
     }
+    console.log(`Summary: ${denyCount} deny, ${allowCount} allow`);
   }
 
   // ── 8c: Risk Evaluation ────────────────────────────────────────────────────
@@ -1180,11 +1321,14 @@ async function section8_manualPipeline(platform: ArelisPlatform, aiSystemId: str
   const riskResult = await platform.risk.evaluate({
     runId,
     aiSystemId,
-    policyDecisions: [{ effect: 'allow', checkpoint: 'BeforePrompt', reason: 'No PII detected' }],
-    quotaState: { tokensIn: 48_231, tokensOut: 2_100, requestsCount: 1, costUsd: 0.001 },
-    evaluationSignals: { contentSafety: 'pass', piiDetected: false },
+    policyDecisions: [
+      { effect: 'block', reason: 'PII detected in prompt', code: 'PII_DENY' },
+      { effect: 'block', reason: 'Credential pattern in output', code: 'CRED_LEAK' },
+    ],
+    quotaState: {},
+    evaluationSignals: [],
+    explicitSignals: { surface: 'model', outcome: 'blocked', environment: 'prod', contentSafety: 'fail', credentialDetected: true },
   }).catch((err) => {
-    // Platform may require specific input shapes depending on org config
     console.warn(`[Arelis] risk.evaluate: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   });
@@ -1376,13 +1520,13 @@ async function main(): Promise<void> {
   const policyId = await section3_policySetup(platform);
 
   // Section 4: governedInvoke
-  await section4_governedInvoke(arelis, policyId);
+  await section4_governedInvoke(arelis, platform, aiSystemId, policyId);
 
   // Section 5: Standalone Gate
-  await section5_standaloneGate(platform);
+  await section5_standaloneGate(platform, aiSystemId);
 
   // Section 6: Agent Run
-  await section6_agentRun(arelis, policyId);
+  await section6_agentRun(arelis, platform, aiSystemId, policyId);
 
   // Section 7: Low-Level Runtime (all subsystems)
   const { memorySink } = await section7_lowLevelRuntime();

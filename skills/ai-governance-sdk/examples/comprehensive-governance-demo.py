@@ -14,6 +14,7 @@ Demonstrates the FULL SDK surface using the unified `create_arelis` client:
   9.  Manual pre-invocation gate (`evaluate_pre_invocation_gate`)
  10.  BeforeToolCall / AfterToolResult custom policy evaluation
  11.  Platform events (create, batch, list, count)
+ 11b.  Platform policy evaluation (evaluatePolicy with PII denials)
  12.  Risk evaluation (low, medium, high scenarios)
  13.  Causal graph construction, commit, lineage
  14.  Compliance proof generation & verification
@@ -45,8 +46,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from pathlib import Path
 from dotenv import load_dotenv
 
+load_dotenv(Path(__file__).resolve().parents[3] / ".env.local")
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -743,6 +746,28 @@ def demo_platform_events(platform, ai_system_id: str) -> list[dict]:
     except Exception as e:
         print(f"  Batch (may not be supported): {e}")
 
+    # Governance gate event with PII (triggers policy denials)
+    section("Emit governance gate event with PII")
+    try:
+        platform.events.create({
+            "runId": run_id,
+            "aiSystemId": ai_system_id,
+            "eventType": "governance.gate.evaluated",
+            "actor": {"type": "human", "id": "demo-user"},
+            "resource": {"type": "model", "id": MODEL_GEMINI},
+            "action": "evaluate",
+            "timestamp": now_iso(),
+            "metadata": {
+                "pii_detected": True,
+                "pii_types": ["ssn", "email"],
+                "pii_count": 2,
+                "decision": "deny",
+            },
+        })
+        print(f"  governance.gate.evaluated event emitted (PII detected)")
+    except Exception as e:
+        print(f"  governance.gate.evaluated: {e}")
+
     # List events
     section("List events for run")
     try:
@@ -764,81 +789,85 @@ def demo_platform_events(platform, ai_system_id: str) -> list[dict]:
 
 
 # =========================================================================
+# 11b. Platform Policy Evaluation (evaluatePolicy)
+# =========================================================================
+
+
+def demo_policy_evaluation(platform) -> None:
+    header("11b. Platform Policy Evaluation (evaluatePolicy)")
+    run_id = f"run-policy-eval-{uuid.uuid4()}"
+
+    section("evaluatePolicy with PII (should trigger denials)")
+    try:
+        result_pii = platform.governance.evaluatePolicy({
+            "runId": run_id,
+            "checkpoint": {
+                "content": {"pii_detected": True, "pii_types": ["ssn", "email"], "pii_count": 2},
+            },
+        })
+        decisions = result_pii.get("decisions", [])
+        deny_count = sum(1 for d in decisions if d.get("decision") == "deny")
+        allow_count = sum(1 for d in decisions if d.get("decision") == "allow")
+        print(f"  Decisions: {len(decisions)} total ({deny_count} deny, {allow_count} allow)")
+        for d in decisions:
+            decision = d.get("decision", "?")
+            name = d.get("metadata", {}).get("policyName", d.get("policyId", "?"))
+            if decision == "deny":
+                print(f"  - {decision} ({name})")
+    except Exception as e:
+        print(f"  evaluatePolicy (PII) failed: {e}")
+
+    section("evaluatePolicy clean (should all allow)")
+    try:
+        result_clean = platform.governance.evaluatePolicy({
+            "runId": f"{run_id}-clean",
+            "checkpoint": {
+                "content": {"pii_detected": False, "pii_types": [], "pii_count": 0},
+            },
+        })
+        decisions = result_clean.get("decisions", [])
+        deny_count = sum(1 for d in decisions if d.get("decision") == "deny")
+        allow_count = sum(1 for d in decisions if d.get("decision") == "allow")
+        print(f"  Decisions: {len(decisions)} total ({deny_count} deny, {allow_count} allow)")
+    except Exception as e:
+        print(f"  evaluatePolicy (clean) failed: {e}")
+
+    print()
+
+
+# =========================================================================
 # 12. Risk Evaluation
 # =========================================================================
 
 
 def demo_risk_evaluation(platform, ai_system_id: str) -> list[dict]:
-    header("12. Risk Evaluation (Low, Medium, High)")
-    results = []
+    header("12. Risk Evaluation")
+    run_id = f"run-risk-{uuid.uuid4()}"
 
-    scenarios = [
-        {
-            "label": "Low risk -- clean invocation",
-            "run_id": f"run-risk-low-{uuid.uuid4()}",
-            "policy_decisions": [{"policyId": "pii-deny", "decision": "allow", "severity": "low"}],
-            "quota_state": {
-                "audit_event": {"used": 4500, "limit": 100_000},
-                "compliance_proof": {"used": 23, "limit": 500},
+    try:
+        risk = platform.risk.evaluate({
+            "runId": run_id,
+            "aiSystemId": ai_system_id,
+            "policyDecisions": [
+                {"effect": "block", "reason": "PII detected in prompt", "code": "PII_DENY"},
+                {"effect": "block", "reason": "Credential pattern in output", "code": "CRED_LEAK"},
+            ],
+            "quotaState": {},
+            "evaluationSignals": [],
+            "explicitSignals": {
+                "surface": "model",
+                "outcome": "blocked",
+                "environment": "prod",
+                "contentSafety": "fail",
+                "credentialDetected": True,
             },
-            "signals": [
-                {"name": "model_latency_ms", "value": 340, "severity": "low"},
-                {"name": "output_toxicity_score", "value": 0.02, "severity": "low"},
-            ],
-        },
-        {
-            "label": "Medium risk -- PII blocked + elevated signals",
-            "run_id": f"run-risk-med-{uuid.uuid4()}",
-            "policy_decisions": [{"policyId": "pii-deny", "decision": "deny", "severity": "critical"}],
-            "quota_state": {
-                "audit_event": {"used": 72_000, "limit": 100_000},
-                "compliance_proof": {"used": 410, "limit": 500},
-            },
-            "signals": [
-                {"name": "pii_detected", "value": 1, "severity": "high"},
-                {"name": "output_toxicity_score", "value": 0.35, "severity": "medium"},
-                {"name": "hallucination_confidence", "value": 0.45, "severity": "medium"},
-            ],
-        },
-        {
-            "label": "High risk -- multiple denials + quota exhausted",
-            "run_id": f"run-risk-high-{uuid.uuid4()}",
-            "policy_decisions": [
-                {"policyId": "pii-deny", "decision": "deny", "severity": "critical"},
-                {"policyId": "content-safety", "decision": "deny", "severity": "critical"},
-            ],
-            "quota_state": {
-                "audit_event": {"used": 99_800, "limit": 100_000},
-                "compliance_proof": {"used": 498, "limit": 500},
-            },
-            "signals": [
-                {"name": "pii_detected", "value": 1, "severity": "high"},
-                {"name": "output_toxicity_score", "value": 0.92, "severity": "high"},
-                {"name": "hallucination_confidence", "value": 0.87, "severity": "high"},
-                {"name": "prompt_injection_score", "value": 0.95, "severity": "high"},
-            ],
-        },
-    ]
-
-    for s in scenarios:
-        section(s["label"])
-        try:
-            risk = platform.risk.evaluate({
-                "runId": s["run_id"],
-                "aiSystemId": ai_system_id,
-                "policyDecisions": s["policy_decisions"],
-                "quotaState": s["quota_state"],
-                "evaluationSignals": s["signals"],
-            })
-            print(f"  Action: {risk['action']} | Score: {risk['score']}")
-            print(f"  Hash: {risk['deterministicInputsHash']}")
-            results.append({"label": s["label"], "action": risk["action"], "score": risk["score"]})
-        except Exception as e:
-            print(f"  Risk evaluation failed: {e}")
-            results.append({"label": s["label"], "action": "error", "score": -1})
-
-    print()
-    return results
+        })
+        print(f"  Action: {risk.get('action')} | Score: {risk.get('score')}")
+        print(f"  Hash: {risk.get('deterministicInputsHash', 'N/A')[:24]}...")
+        return [{"action": risk.get("action"), "score": risk.get("score")}]
+    except Exception as e:
+        print(f"  Risk evaluation failed: {e}")
+        return [{"action": "error", "score": -1}]
 
 
 # =========================================================================
@@ -1005,14 +1034,15 @@ def demo_post_stream_pipeline(platform, ai_system_id: str) -> None:
 
     # D. Post-stream policy evaluation (AfterModelOutput)
     try:
-        platform.governance.evaluatePolicy({
+        eval_result = platform.governance.evaluatePolicy({
             "runId": run_id,
             "checkpoint": {
-                "type": "AfterModelOutput",
-                "content": {"output_length": len(total_output)},
+                "content": {"pii_detected": True, "pii_types": ["email"], "pii_count": 1},
             },
         })
-        print("  D. AfterModelOutput policy evaluated")
+        decisions = eval_result.get("decisions", [])
+        deny_count = sum(1 for d in decisions if d.get("decision") == "deny")
+        print(f"  D. Policy evaluated: {len(decisions)} decisions ({deny_count} deny)")
     except Exception as e:
         print(f"  D. Post-stream evaluatePolicy: {e}")
 
@@ -1022,6 +1052,9 @@ def demo_post_stream_pipeline(platform, ai_system_id: str) -> None:
             "runId": run_id,
             "aiSystemId": ai_system_id,
             "policyDecisions": policy_decisions,
+            "quotaState": {},
+            "evaluationSignals": [],
+            "explicitSignals": {"surface": "model", "outcome": "allowed"},
         })
         print(f"  E. Risk evaluated: action={risk.get('action')}, score={risk.get('score')}")
     except Exception as e:
@@ -1324,6 +1357,9 @@ async def main() -> None:
     events_run_id = f"run-events-demo-{uuid.uuid4()}"
     events_log = demo_platform_events(platform, gemini_system_id)
 
+    # 11b. Platform policy evaluation
+    demo_policy_evaluation(platform)
+
     # 12. Risk evaluation
     risk_results = demo_risk_evaluation(platform, gemini_system_id)
 
@@ -1371,9 +1407,9 @@ async def main() -> None:
         print(f"  Steps: {len(agent_result.steps)}")
         print(f"  Events: {len(agent_result.events)}")
 
-    print(f"\nRisk evaluations:")
+    print(f"\nRisk evaluation:")
     for r in risk_results:
-        print(f"  {r['label']:<45} action={r['action']:<10} score={r['score']}")
+        print(f"  action={r.get('action', 'N/A')}, score={r.get('score', 'N/A')}")
 
     if graph_result:
         print(f"\nCausal graph:")
@@ -1385,7 +1421,7 @@ async def main() -> None:
         print(f"  Proof ID: {proof_result['proofId']}")
         print(f"  Verified: {proof_result['verified']}")
 
-    print(f"\nDemo complete -- {20} sections exercised.")
+    print(f"\nDemo complete -- 21 sections exercised.")
     print()
 
 
