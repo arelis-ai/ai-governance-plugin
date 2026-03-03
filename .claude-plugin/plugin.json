@@ -6,7 +6,9 @@
     "name": "Arelis AI"
   },
   "homepage": "https://api.arelis.digital",
+  "repository": "https://github.com/arelis-ai/ai-governance-plugin",
   "license": "MIT",
+  "keywords": ["ai-governance", "arelis", "compliance", "policy", "pii", "audit", "risk", "agents"],
   "mcpServers": {
     "arelis": {
       "command": "npx",
