@@ -1,0 +1,28 @@
+{
+  "name": "arelis-ai-governance",
+  "owner": {
+    "name": "Arelis AI",
+    "email": "support@arelis.digital"
+  },
+  "metadata": {
+    "description": "AI governance plugins for building compliant, auditable AI systems with the Arelis platform",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "arelis-sdk",
+      "source": "./",
+      "description": "Generates and reviews code using the Arelis AI Governance SDK for TypeScript and Python. Covers createArelis orchestration, governedInvoke, agents.run, governance gates, managed PII config, platform events, causal graphs, policy engines, audit sinks, MCP, RAG, memory, quotas, and compliance.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Arelis AI"
+      },
+      "homepage": "https://api.arelis.digital",
+      "repository": "https://github.com/arelis-ai/ai-governance-plugin",
+      "license": "MIT",
+      "keywords": ["ai-governance", "arelis", "compliance", "policy", "pii", "audit", "risk", "agents"],
+      "category": "ai-governance",
+      "tags": ["governance", "compliance", "audit", "pii", "risk", "agents", "arelis"]
+    }
+  ]
+}
